@@ -9,7 +9,6 @@ import json
 import subprocess
 import os
 import re
-import time
 
 # MiniMax API 配置
 MINIMAX_API_URL = "https://api.minimaxi.com/anthropic/v1/messages"
@@ -18,17 +17,16 @@ MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY", "")
 # 知识库配置
 KNOWLEDGE_SPACE_ID = "7628219860123667634"
 
-# 系统关键词映射
+# 系统关键词映射（用于判断问题属于哪个系统）
 SYSTEM_KEYWORDS = {
-    "低延时": ["低延时", "lowlatency", "low-latency", "latency"],
-    "顶点": ["顶点", "dingding", "现货", "期货", "symbol"],
+    "低延时": ["低延时", "lowlatency", "low-latency", "latency", "wtfs", "委托方式", "client_feature"],
+    "顶点": ["顶点", "dingding", "现货", "期货", "symbol", "wtfs"],
 }
 
-# 系统路由配置
-SYSTEM_ROUTING = {
-    "低延时": "低延时",
-    "顶点": "顶点",
-    "all": "all"
+# 系统文档标题关键词（用于过滤搜索结果）
+SYSTEM_TITLE_KEYWORDS = {
+    "低延时": ["低延时", "lowlatency", "low-latency"],
+    "顶点": ["顶点", "dingding", "hts"],
 }
 
 
@@ -38,65 +36,65 @@ def run_command(cmd):
         cmd,
         shell=True,
         capture_output=True,
-        text=True,
         cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     )
-    return result.stdout, result.stderr, result.returncode
+    stdout = result.stdout.decode('utf-8', errors='replace') if result.stdout else ""
+    stderr = result.stderr.decode('utf-8', errors='replace') if result.stderr else ""
+    return stdout, stderr, result.returncode
 
 
 def detect_system(question):
     """根据问题关键词判断属于哪个系统"""
     question_lower = question.lower()
-    for system, triggers in SYSTEM_KEYWORDS.items():
-        for t in triggers:
-            if t.lower() in question_lower:
-                return system
+
+    # 先检测是否是明确的系统问题
+    has_lowlatency = any(t.lower() in question_lower for t in SYSTEM_KEYWORDS["低延时"])
+    has_dingding = any(t.lower() in question_lower for t in SYSTEM_KEYWORDS["顶点"])
+
+    # 如果两个都有，根据第一个出现的关键词判断
+    if has_lowlatency and has_dingding:
+        idx_low = min((question_lower.find(t.lower()) for t in SYSTEM_KEYWORDS["低延时"] if t.lower() in question_lower), default=999)
+        idx_ding = min((question_lower.find(t.lower()) for t in SYSTEM_KEYWORDS["顶点"] if t.lower() in question_lower), default=999)
+        if idx_low <= idx_ding:
+            return "低延时"
+        else:
+            return "顶点"
+
+    if has_lowlatency:
+        return "低延时"
+    if has_dingding:
+        return "顶点"
+
     return "all"
 
 
-def load_index(index_path="kb_index.json"):
-    """加载缓存索引"""
-    if os.path.exists(index_path):
-        try:
-            with open(index_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            pass
-    return None
+def filter_results_by_system(results, system):
+    """严格过滤结果，只保留指定系统的文档"""
+    if system == "all":
+        return results
 
+    filtered = []
+    system_kws = SYSTEM_TITLE_KEYWORDS.get(system, [])
 
-def search_index(index, query, system="all"):
-    """在索引中搜索文档"""
-    if not index:
-        return []
+    for r in results:
+        title = r.get("title", "").lower()
+        url = r.get("url", "").lower()
 
-    query_lower = query.lower()
-    matched = []
+        # 检查标题或URL是否包含系统关键词
+        matched = any(kw.lower() in title or kw.lower() in url for kw in system_kws)
 
-    # 优先在关键词索引中找
-    for keyword, titles in index.get("keyword_index", {}).items():
-        if keyword in query_lower or query_lower in keyword:
-            for title in titles:
-                for doc in index.get("documents", []):
-                    if doc["title"] == title:
-                        if system == "all" or doc.get("system") == system:
-                            matched.append(doc)
+        if matched:
+            filtered.append(r)
+        # 如果标题不包含任何系统关键词（如通用文档），也保留
+        elif not any(kw.lower() in title for kw_list in SYSTEM_TITLE_KEYWORDS.values() for kw in kw_list):
+            filtered.append(r)
 
-    # 如果没找到，用标题模糊匹配
-    if not matched:
-        for doc in index.get("documents", []):
-            title = doc.get("title", "").lower()
-            if query_lower in title or any(kw in title for kw in query_lower.split()):
-                if system == "all" or doc.get("system") == system:
-                    matched.append(doc)
-
-    return matched[:10]  # 最多返回10条
+    return filtered
 
 
 def generate_search_queries(question, system):
     """调用 LLM 生成多个搜索角度的查询词"""
     if not MINIMAX_API_KEY:
-        # 没有 API Key 时返回默认扩展
         return expand_query_fallback(question)
 
     prompt = f"""你是一个知识库搜索专家。用户会问各种业务问题，你需要生成多个不同角度的搜索词来帮助找到相关文档。
@@ -104,15 +102,16 @@ def generate_search_queries(question, system):
 **用户问题：**
 {question}
 
-**系统分类：**
+**目标系统分类：**
 {system}
 
 **要求：**
-1. 生成 3-5 个不同角度的搜索词
-2. 每个搜索词都应该能独立搜索
-3. 考虑同义词、相关概念、常见表述
-4. 如果问题涉及数字代码（如 7100701），要补充业务上下文（如"接口"、"symbol"、"合约"）
-5. 搜索词要简洁，不超过 20 个字符
+1. 生成 3-6 个不同角度的搜索词
+2. 每个搜索词简短，不超过20字符
+3. 考虑同义词、相关概念
+4. 如果问的是低延时系统，搜索词要围绕低延时展开
+5. 如果问的是顶点系统，搜索词要围绕顶点展开
+6. 如果是"低延时XXX"，搜索词应该是"低延时 XXX"或"低延时 委托方式 XXX"
 
 **输出格式（只输出搜索词，每行一个，不要其他内容）："""
 
@@ -143,7 +142,6 @@ def generate_search_queries(question, system):
             result = json.loads(response.read().decode('utf-8'))
             if result.get("content"):
                 queries = result["content"][0]["text"].strip().split('\n')
-                # 清理并返回
                 return [q.strip() for q in queries if q.strip()][:6]
     except:
         pass
@@ -152,40 +150,36 @@ def generate_search_queries(question, system):
 
 
 def expand_query_fallback(question):
-    """备用扩展逻辑（当 LLM 不可用时）"""
+    """备用扩展逻辑"""
     queries = [question]
 
     # 对数字代码补充上下文
-    import re
     numbers = re.findall(r'\d{4,}', question)
     for num in numbers:
         queries.extend([
-            f"{num} 接口",
-            f"{num} symbol",
-            f"{num} 合约",
-            f"{num} 说明"
+            f"{num}",
+            f"接口 {num}",
+            f"委托方式 {num}",
         ])
 
-    # 通用扩展
-    if "什么" in question or "是" in question:
-        queries.append(question.replace("是什么", "").replace("什么", ""))
-    if "怎么" in question or "如何" in question:
-        queries.append(question.replace("怎么", "").replace("如何", ""))
+    # 对wtfs补充
+    if "wtfs" in question.lower():
+        queries.extend([
+            "wtfs 委托方式",
+            "委托方式 wtfs",
+            "wtfs",
+        ])
 
     return list(set(queries))[:6]
 
 
-def search_lark_cli(query, system="all", max_results=5):
+def search_lark_cli(query, system="all", max_results=10):
     """调用 lark-cli 搜索知识库"""
-    if system != "all" and system in SYSTEM_KEYWORDS:
-        # 添加系统标识
-        query = f"{query} {system}"
-
     cmd = f'lark-cli docs +search --query "{query}" --page-size {max_results} --format json'
     stdout, stderr, code = run_command(cmd)
 
-    if code != 0:
-        return [], f"搜索失败: {stderr}"
+    if code != 0 or not stdout:
+        return [], f"搜索失败: {stderr or '无输出'}"
 
     try:
         data = json.loads(stdout)
@@ -194,7 +188,7 @@ def search_lark_cli(query, system="all", max_results=5):
             for item in data["data"]["results"][:max_results]:
                 meta = item.get("result_meta", {})
                 results.append({
-                    "title": meta.get("title", ""),
+                    "title": meta.get("title", "") or "无标题",
                     "url": meta.get("url", ""),
                     "token": meta.get("token", ""),
                     "doc_type": meta.get("doc_types", ""),
@@ -205,9 +199,8 @@ def search_lark_cli(query, system="all", max_results=5):
         return [], f"解析搜索结果失败: {e}"
 
 
-def search_with_multi_queries(question, system="all", max_results=5):
-    """使用多个查询词搜索并合并结果"""
-    # 1. 首先尝试 LLM 生成搜索词
+def search_with_system_filter(question, system="all", max_results=5):
+    """使用多查询词搜索，并对结果严格按系统过滤"""
     queries = generate_search_queries(question, system)
 
     print(f"[查询扩展] 尝试 {len(queries)} 个搜索词: {queries[:3]}...")
@@ -221,7 +214,16 @@ def search_with_multi_queries(question, system="all", max_results=5):
             if r["title"] not in all_results:
                 all_results[r["title"]] = r
 
-    return list(all_results.values())
+    # 合并所有结果
+    merged = list(all_results.values())
+
+    # 严格按系统过滤
+    if system != "all":
+        filtered = filter_results_by_system(merged, system)
+        print(f"[系统过滤] 原始 {len(merged)} 条 -> 过滤后 {len(filtered)} 条 ({system})")
+        return filtered
+
+    return merged
 
 
 def fetch_document_content(doc_token, doc_type):
@@ -316,7 +318,6 @@ def main():
     parser.add_argument("--system", "-s", default="auto", help="系统: 低延时|顶点|all|auto (默认 auto)")
     parser.add_argument("--max-results", "-n", type=int, default=5, help="最大检索文档数")
     parser.add_argument("--api-key", "-k", default=None, help="MiniMax API Key")
-    parser.add_argument("--index", default="kb_index.json", help="本地索引文件路径")
 
     args = parser.parse_args()
 
@@ -334,16 +335,9 @@ def main():
     print(f"[系统] {detected}")
     print()
 
-    # 尝试加载本地索引（暂时禁用，因为索引构建还不完善）
-    # index = load_index(args.index)
-    index = None
-
-    if index:
-        print("[使用] 本地索引缓存")
-        results = search_index(index, args.question, detected)
-    else:
-        print("[搜索] 调用 lark-cli 搜索...")
-        results = search_with_multi_queries(args.question, detected, args.max_results)
+    # 搜索（带系统过滤）
+    print("[搜索] 调用 lark-cli 搜索...")
+    results = search_with_system_filter(args.question, detected, args.max_results)
 
     if not results:
         print("[未找到相关文档]")
