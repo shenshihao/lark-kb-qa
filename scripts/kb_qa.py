@@ -23,6 +23,38 @@ SYSTEM_KEYWORDS = {
     "顶点": "顶点",
 }
 
+# 查询扩展词库（近义词/相关概念）
+QUERY_EXPANSIONS = {
+    # 交易时段相关
+    "交易时段": ["申报时间", "业务时段", "交易时间", "可交易时间", "禁止申报", "禁用时段"],
+    "禁用": ["禁止", "不允许", "无法申报", "暂停"],
+    "申报": ["委托", "下单", "交易申报"],
+
+    # 折算率相关
+    "折算率": ["折算比例", "折算系数", "担保比例", "折算"],
+    "担保比例": ["维持担保比例", "风控比例", "平仓线", "警戒线"],
+
+    # 资金相关
+    "可用余额": ["可取余额", "资金余额", "账户余额", "可用资金"],
+    "可取余额": ["可用余额", "资金余额", "可取资金"],
+
+    # 交易相关
+    "开仓": ["买入", "建仓", "融资开仓"],
+    "平仓": ["卖出", "了结", "融资平仓"],
+    "补仓": ["追保", "追加保证金"],
+    "强平": ["强制平仓", "强行平仓"],
+
+    # 错误相关
+    "报错": ["错误", "失败", "异常", "问题"],
+    "两融报错": ["融资报错", "融券报错", "两融错误", "融资融券异常"],
+}
+
+# 从错误信息中提取业务关键词
+ERROR_KEYWORDS = [
+    "交易时段", "业务申报", "禁用", "禁止", "申报限制",
+    "融资", "融券", "保证金", "折算率", "授信", "额度"
+]
+
 
 def run_command(cmd):
     """执行 shell 命令并返回输出"""
@@ -34,6 +66,61 @@ def run_command(cmd):
         cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     )
     return result.stdout, result.stderr, result.returncode
+
+
+def extract_business_terms(question):
+    """从问题中提取业务关键词（用于扩展搜索）"""
+    terms = []
+    question_lower = question.lower()
+
+    # 检查问题中是否包含已知的业务术语
+    for key, synonyms in QUERY_EXPANSIONS.items():
+        if key in question_lower or any(s in question_lower for s in synonyms):
+            terms.append(key)
+            terms.extend(synonyms)
+
+    # 额外检查常见关键词
+    for kw in ERROR_KEYWORDS:
+        if kw in question_lower:
+            terms.append(kw)
+
+    return list(set(terms))
+
+
+def expand_query(question):
+    """扩展查询词，生成多个搜索查询"""
+    queries = [question]  # 原始查询
+
+    # 1. 处理错误信息场景
+    if "报错" in question or "错误" in question or "禁用" in question or "禁止" in question:
+        # 提取错误描述中的业务概念
+        business_terms = extract_business_terms(question)
+        for term in business_terms:
+            if term not in queries:
+                queries.append(term)
+
+        # 专门处理"该交易时段内禁用此业务申报"类错误
+        if "交易时段" in question or "申报" in question:
+            queries.extend([
+                "融资融券交易时段",
+                "申报限制",
+                "交易时段禁止申报",
+                "融资申报时段",
+                "融券申报时段",
+                "两融交易规则",
+                "融资融券业务规则"
+            ])
+
+    # 2. 添加通用扩展
+    general_expansions = [
+        "融资", "融券", "交易规则", "业务规则", "交易限制"
+    ]
+    for exp in general_expansions:
+        if exp not in queries and (any(c.isalpha() and c < '一' for c in question)):
+            # 如果问题是中文，添加扩展
+            queries.append(exp)
+
+    return queries[:6]  # 最多6个查询
 
 
 def search_knowledge_base(query, system="all", max_results=5):
@@ -65,6 +152,25 @@ def search_knowledge_base(query, system="all", max_results=5):
         return results, None
     except json.JSONDecodeError as e:
         return [], f"解析搜索结果失败: {e}"
+
+
+def search_with_expansion(question, system="all", max_results=5):
+    """带查询扩展的搜索"""
+    queries = expand_query(question)
+
+    all_results = {}  # 去重用 title 做 key
+
+    print(f"[查询扩展] 尝试 {len(queries)} 个搜索词...")
+
+    for q in queries:
+        results, error = search_knowledge_base(q, system, max_results)
+        if error:
+            continue
+        for r in results:
+            if r["title"] not in all_results:
+                all_results[r["title"]] = r
+
+    return list(all_results.values()), None
 
 
 def fetch_document_content(doc_token, doc_type):
@@ -189,24 +295,24 @@ def main():
     if args.api_key:
         os.environ["MINIMAX_API_KEY"] = args.api_key
 
-    print(f"🔍 正在搜索知识库: {args.question}")
-    print(f"   系统: {args.system}")
+    print(f"[搜索] {args.question}")
+    print(f"   [系统] {args.system}")
     print()
 
-    # Step 1: 搜索
-    results, error = search_knowledge_base(args.question, args.system, args.max_results)
+    # Step 1: 搜索（带扩展）
+    results, error = search_with_expansion(args.question, args.system, args.max_results)
     if error:
-        print(f"❌ {error}")
+        print(f"[错误] {error}")
         return
 
     if not results:
-        print("❌ 未找到相关文档")
+        print("[未找到相关文档]")
         return
 
-    print(f"✅ 找到 {len(results)} 篇相关文档\n")
+    print(f"[找到 {len(results)} 篇相关文档]\n")
 
     # Step 2: 获取内容
-    print("📄 正在获取文档内容...\n")
+    print("[获取文档内容]\n")
     contexts = []
     sources = []
 
@@ -223,29 +329,29 @@ def main():
                 sources.append(f"- {doc['title']}: {doc['url']}")
 
     if not contexts:
-        print("❌ 无法获取文档内容")
+        print("[无法获取文档内容]")
         return
 
     # Step 3: 生成答案
-    print("\n🤖 正在生成答案...\n")
+    print("\n[生成答案]\n")
 
     context_text = "\n\n".join(contexts)
     answer, error = generate_answer(args.question, context_text)
 
     if error:
-        print(f"❌ {error}")
+        print(f"[错误] {error}")
         print("\n--- 参考文档 ---")
         print("\n".join(sources))
         return
 
     # 输出结果
     print("=" * 50)
-    print("📝 答案:")
+    print("答案:")
     print("=" * 50)
     print(answer)
     print()
     print("=" * 50)
-    print("📚 参考文档:")
+    print("参考文档:")
     print("=" * 50)
     print("\n".join(sources))
 
