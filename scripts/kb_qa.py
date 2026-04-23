@@ -425,13 +425,14 @@ def fetch_document_content(doc_token, doc_type, file_type=""):
             return parse_document(doc_token, "XLSX", max_chars=1000)
 
         # 根据 file_type 分发
-        if file_type.lower() in ("xlsx", "xls"):
+        ft_lower = file_type.lower()
+        if ft_lower in ("xlsx", "xls"):
             return parse_document(doc_token, "XLSX", max_chars=1000)
-        elif file_type.lower() == "pdf":
+        elif ft_lower == "pdf":
             return parse_document(doc_token, "PDF", max_chars=1000)
-        elif file_type.lower() == "csv":
+        elif ft_lower == "csv":
             return parse_document(doc_token, "CSV", max_chars=1000)
-        elif file_type.lower() == "docx":
+        elif ft_lower == "docx":
             # docx 走 docs +fetch
             cmd = f'lark-cli docs +fetch --doc {doc_token} --format json'
             stdout, stderr, code = run_command(cmd)
