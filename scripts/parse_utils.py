@@ -30,12 +30,41 @@ except ImportError:
     HAS_PANDAS = False
 
 
-def download_file(token, output_path):
+def get_file_token_from_doc(doc_token):
+    """根据 doc_token 获取 file_token
+
+    用于 xlsx 等文件类型，需要先获取真实的 file_token 再下载。
+
+    返回: (file_token, error_msg)
+    """
+    cmd = f'lark-cli drive files get_metadata --doc-token "{doc_token}" --format json'
+    result = subprocess.run(
+        cmd,
+        shell=True,
+        capture_output=True,
+        text=True
+    )
+    if result.returncode != 0:
+        return "", f"获取文件元数据失败: {result.stderr}"
+
+    try:
+        data = json.loads(result.stdout)
+        if data.get("ok"):
+            file_token = data.get("data", {}).get("file_token", "")
+            if file_token:
+                return file_token, ""
+            return "", "未找到 file_token"
+        return "", f"API 错误: {data}"
+    except json.JSONDecodeError:
+        return "", f"解析元数据失败: {result.stdout}"
+
+
+def download_file(file_token, output_path):
     """使用 lark-cli 下载文件到本地
 
     返回: (success, error_msg)
     """
-    cmd = f'lark-cli drive files download --file-token "{token}" --output "{output_path}"'
+    cmd = f'lark-cli drive files download --file-token "{file_token}" --output "{output_path}"'
     result = subprocess.run(
         cmd,
         shell=True,
@@ -132,10 +161,15 @@ def parse_csv(file_path, max_chars=500):
         return "", f"CSV 解析失败: {e}"
 
 
-def parse_document(token, doc_type, max_chars=500):
+def parse_document(doc_token, doc_type, max_chars=500):
     """统一文档解析入口
 
     支持类型: PDF, XLSX, XLS, CSV, DOCX, DOC
+
+    Args:
+        doc_token: 文档 token（xlsx 等文件类型需要先获取 file_token）
+        doc_type: 文档类型
+        max_chars: 最大提取字符数
 
     Returns:
         (content, error_msg)
@@ -143,24 +177,34 @@ def parse_document(token, doc_type, max_chars=500):
     if doc_type in ("PDF",):
         # PDF 需要先下载再解析
         with tempfile.TemporaryDirectory() as tmpdir:
-            output_path = os.path.join(tmpdir, f"{token}.pdf")
-            success, err = download_file(token, output_path)
+            output_path = os.path.join(tmpdir, f"{doc_token}.pdf")
+            success, err = download_file(doc_token, output_path)
             if not success:
                 return "", f"下载失败: {err}"
             return parse_pdf(output_path, max_chars)
 
     elif doc_type in ("XLSX", "XLS"):
+        # xlsx 文件需要先获取 file_token
+        file_token, err = get_file_token_from_doc(doc_token)
+        if err:
+            return "", f"获取 file_token 失败: {err}"
+
         with tempfile.TemporaryDirectory() as tmpdir:
-            output_path = os.path.join(tmpdir, f"{token}.xlsx")
-            success, err = download_file(token, output_path)
+            output_path = os.path.join(tmpdir, f"{file_token}.xlsx")
+            success, err = download_file(file_token, output_path)
             if not success:
                 return "", f"下载失败: {err}"
             return parse_excel(output_path, max_chars)
 
     elif doc_type in ("CSV",):
+        # CSV 也需要先获取 file_token
+        file_token, err = get_file_token_from_doc(doc_token)
+        if err:
+            return "", f"获取 file_token 失败: {err}"
+
         with tempfile.TemporaryDirectory() as tmpdir:
-            output_path = os.path.join(tmpdir, f"{token}.csv")
-            success, err = download_file(token, output_path)
+            output_path = os.path.join(tmpdir, f"{file_token}.csv")
+            success, err = download_file(file_token, output_path)
             if not success:
                 return "", f"下载失败: {err}"
             return parse_csv(output_path, max_chars)
