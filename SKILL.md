@@ -63,12 +63,29 @@ python kb_qa.py --question "问题" --index kb_index.json
 # 复制到 OpenClaw 服务器
 scp -r lark-kb-qa user@server:~/.openclaw/skills/
 
-# 确保设置环境变量
-export MINIMAX_API_KEY="your-api-key"
+# 安装依赖
+pip install -r lark-kb-qa/requirements.txt
 
-# 可选：建立本地索引（加速搜索）
+# 设置环境变量
+export MINIMAX_API_KEY="your-minimax-api-key"
+export JINA_API_KEY="your-jina-api-key"   # 用于向量检索（可选）
+
+# 可选：建立本地向量索引（加速语义搜索）
+# 1. 先扫描知识库文档
 python scripts/scan_knowledge_base.py --output kb_index.json
+# 2. 向量化文档
+python scripts/embedding_cache.py --build
 ```
+
+## 向量检索（可选）
+
+启用向量检索可提升语义匹配效果：
+
+1. 注册 Jina AI (https://jina.ai) 获取免费 API Key
+2. 设置 `JINA_API_KEY` 环境变量
+3. 运行 `python scripts/embedding_cache.py --build` 建立向量索引
+
+**优势：** 能找到表达不同但语义相似的文档（如"加杠杆"匹配"融资买入"）
 
 ## 使用方法
 
@@ -99,7 +116,12 @@ python scripts/scan_knowledge_base.py --output kb_index.json
 
 - Python 3.6+
 - lark-cli（已配置好认证）
+- requests（HTTP 调用）
+- PyPDF2（PDF 解析，可选）
+- openpyxl（Excel 解析，可选）
+- pandas（CSV 解析，可选）
 - MiniMax API Key（用于 LLM 查询扩展和答案生成）
+- Jina API Key（可选，用于向量检索）
 
 ## 知识库配置
 

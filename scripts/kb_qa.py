@@ -29,6 +29,42 @@ SYSTEM_TITLE_KEYWORDS = {
     "顶点": ["顶点", "dingding", "hts"],
 }
 
+# 输入安全过滤规则（基于 RAG 提示工程最佳实践）
+ATTACK_PATTERNS = [
+    # 系统提示词泄露
+    (r"忽略.*提示词", "检测到忽略提示词指令"),
+    (r"你.*(设定|prompt|系统).*是", "检测到系统提示词查询"),
+    (r"(prompt|系统).*泄露", "检测到提示词泄露尝试"),
+    # 角色扮演/越狱
+    (r"角色扮演", "检测到角色扮演请求"),
+    (r"假设.*(黑客|攻击|违法)", "检测到恶意假设请求"),
+    (r"你是.*(杀手|黑客|犯罪)", "检测到身份伪装请求"),
+    # 目标劫持
+    (r"忽略.*指令", "检测到指令劫持"),
+    (r"忽略.*(上面|上述|之前)", "检测到历史指令忽略"),
+    # 注入攻击
+    (r"\\{wrap\\}", "检测到格式化注入"),
+    (r"<[^>]+>", "检测到标签注入"),
+]
+
+
+def input_filter(question):
+    """规则检查，拦截明显攻击性问题
+
+    返回: (passed, reason) - passed=True 表示通过，reason=None
+    """
+    question_clean = question.strip()
+
+    for pattern, reason in ATTACK_PATTERNS:
+        if re.search(pattern, question_clean, re.IGNORECASE):
+            return False, reason
+
+    # 检查是否过短（可能是试探性输入）
+    if len(question_clean) < 2:
+        return False, "问题过短"
+
+    return True, None
+
 
 def run_command(cmd):
     """执行 shell 命令并返回输出"""
@@ -173,6 +209,87 @@ def expand_query_fallback(question):
     return list(set(queries))[:6]
 
 
+def expand_query_for_retry(question):
+    """为空结果时的扩展查询（更通用的表达）"""
+    queries = [question]
+
+    # 提取核心业务词
+    business_terms = []
+    business_terms.extend([
+        "规则", "流程", "条件", "说明",
+        "配置", "接口", "参数", "说明",
+        "多少", "如何", "怎么", "是什么"
+    ])
+
+    # 提取主要名词（去除停用词后的第一个词）
+    stop_words = {"的", "了", "是", "在", "和", "与", "或", "及", "等", "我", "你", "他", "她", "它", "这", "那"}
+    words = re.findall(r'[\w]+', question)
+    main_terms = [w for w in words if w not in stop_words and len(w) >= 2]
+    if main_terms:
+        # 取前两个有意义的词
+        core = "".join(main_terms[:2])
+        queries.append(core)
+
+    return list(set(queries))[:3]
+
+
+def search_with_hybrid(question, system="all", max_results=5):
+    """混合检索：关键词搜索 + 向量检索融合
+
+    当向量索引存在时，将向量检索结果与关键词结果合并去重，
+    并按 score 排序返回。
+    """
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+
+    from scripts.embedding_cache import get_embedding, cosine_similarity, load_vector_cache
+
+    # 1. 关键词搜索结果
+    keyword_results = search_with_system_filter(question, system, max_results * 2)
+
+    # 2. 向量搜索结果（如果有索引）
+    vector_results = []
+    cache = load_vector_cache()
+
+    if cache["documents"]:
+        try:
+            query_embedding = get_embedding(question)
+            similarities = []
+            for i, doc in enumerate(cache["documents"]):
+                vec = cache["vectors"][i]
+                sim = cosine_similarity(query_embedding, vec)
+                similarities.append((sim, doc))
+
+            similarities.sort(reverse=True)
+            for sim, doc in similarities[:max_results]:
+                vector_results.append({
+                    "title": doc.get("title", ""),
+                    "url": doc.get("url", ""),
+                    "token": doc.get("token", ""),
+                    "doc_type": doc.get("doc_type", ""),
+                    "summary": doc.get("content", "")[:200] if doc.get("content") else "",
+                    "score": sim,
+                    "source": "vector"
+                })
+        except Exception as e:
+            print(f"[向量检索] 跳过: {e}")
+
+    # 3. 合并去重
+    seen = {}
+    for r in keyword_results:
+        r["source"] = "keyword"
+        seen[r["title"]] = r
+
+    for r in vector_results:
+        if r["title"] not in seen:
+            seen[r["title"]] = r
+
+    merged = list(seen.values())
+    merged.sort(key=lambda x: x.get("score", 1.0), reverse=True)
+    return merged[:max_results]
+
+
 def search_lark_cli(query, system="all", max_results=10):
     """调用 lark-cli 搜索知识库"""
     cmd = f'lark-cli docs +search --query "{query}" --page-size {max_results} --format json'
@@ -226,6 +343,37 @@ def search_with_system_filter(question, system="all", max_results=5):
     return merged
 
 
+def search_with_retry(question, system="all", max_results=5, max_retries=1):
+    """带空结果自动重试的搜索
+
+    如果首次搜索结果为空，自动扩展查询词重试。
+    """
+    # 首次搜索
+    results = search_with_system_filter(question, system, max_results)
+
+    # 如果有结果，直接返回
+    if results:
+        return results
+
+    # 空结果，重试一次
+    if max_retries > 0:
+        print(f"[重试] 首次搜索无结果，尝试扩展查询...")
+
+        # 使用更通用的扩展词重试
+        retry_queries = expand_query_for_retry(question)
+        print(f"[重试] 扩展查询词: {retry_queries}")
+
+        for q in retry_queries:
+            if q == question:
+                continue  # 跳过原始问题
+            results = search_with_system_filter(q, system, max_results)
+            if results:
+                print(f"[重试成功] 使用 '{q}' 找到 {len(results)} 条结果")
+                return results
+
+    return []
+
+
 def fetch_document_content(doc_token, doc_type):
     """获取文档内容"""
     if doc_type == "WIKI":
@@ -252,28 +400,42 @@ def fetch_document_content(doc_token, doc_type):
             except:
                 pass
 
+    # PDF/Excel 等格式，使用 parse_utils
+    if doc_type in ("PDF", "XLSX", "XLS", "CSV"):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from scripts.parse_utils import parse_document
+        return parse_document(doc_token, doc_type, max_chars=1000)
+
     return "", f"不支持的文档类型或获取失败: {doc_type}"
 
 
 def generate_answer(question, context):
-    """调用 MiniMax LLM 生成答案"""
+    """调用 MiniMax LLM 生成答案（增强版 Prompt）"""
     if not MINIMAX_API_KEY:
         return None, "未设置 MINIMAX_API_KEY 环境变量"
 
     prompt = f"""你是知识库问答助手。请根据以下检索到的知识库内容，回答用户的问题。
 
-**用户问题：**
+<user_question>
 {question}
+</user_question>
 
-**检索到的知识库内容：**
+<knowledge_context>
 {context}
+</knowledge_context>
 
-**要求：**
+**回答要求：**
 1. 基于检索内容回答，不要编造答案
-2. 如果检索内容不足以回答，请说明"根据现有知识库内容无法完全回答此问题"
-3. 回答要简洁、准确
-4. 如有需要，可以列举具体的数据或步骤
-5. 在答案最后，列出参考的文档来源
+2. 如果检索内容不足以回答，请明确说明"根据现有知识库内容无法完全回答此问题"
+3. 回答要简洁、准确，直接给出答案
+4. 如有具体数据或步骤，列出关键信息
+5. **必须**在答案最后，列出所有参考的文档来源（使用上述文档链接）
+
+**输出格式：**
+答案：[直接回答问题]
+参考文档：[列出文档标题和链接]
 
 **答案：**"""
 
@@ -312,6 +474,69 @@ def generate_answer(question, context):
         return None, f"API 请求异常: {str(e)}"
 
 
+def output_filter(question, answer):
+    """LLM 输出一致性检查（快速模式）
+
+    使用简短 prompt 判断答案是否回答了问题。
+    如果答案与问题无关，标记 score=0，触发重新生成。
+
+    返回: (is_relevant, score) - is_relevant=True 表示通过
+    """
+    if not MINIMAX_API_KEY:
+        return True, 1.0
+
+    if not answer or len(answer) < 10:
+        return False, 0.0
+
+    prompt = f"""判断以下答案是否回答了问题。
+
+问题: {question}
+答案: {answer}
+
+判断规则：
+- 如果答案与问题相关且有价值，返回 YES
+- 如果答案与问题无关、答非所问，返回 NO
+- 如果答案承认无法回答问题且有参考价值，返回 YES
+
+输出格式：只输出 YES 或 NO，不要其他内容。"""
+
+    payload = {
+        "model": "MiniMax-M2.7",
+        "max_tokens": 10,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ]
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {MINIMAX_API_KEY}"
+    }
+
+    import urllib.request
+    import urllib.error
+
+    try:
+        req = urllib.request.Request(
+            MINIMAX_API_URL,
+            data=json.dumps(payload).encode('utf-8'),
+            headers=headers,
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=15) as response:
+            result = json.loads(response.read().decode('utf-8'))
+            if result.get("content"):
+                response_text = result["content"][0]["text"].strip().upper()
+                is_relevant = "YES" in response_text
+                score = 1.0 if is_relevant else 0.0
+                return is_relevant, score
+    except:
+        pass
+
+    # API 失败时默认通过，避免阻塞
+    return True, 1.0
+
+
 def main():
     parser = argparse.ArgumentParser(description="飞书知识库问答")
     parser.add_argument("--question", "-q", required=True, help="用户问题")
@@ -324,6 +549,12 @@ def main():
     if args.api_key:
         os.environ["MINIMAX_API_KEY"] = args.api_key
 
+    # 输入安全过滤
+    passed, reason = input_filter(args.question)
+    if not passed:
+        print(f"[安全拦截] {reason}")
+        return
+
     # 自动检测系统
     if args.system == "auto":
         detected = detect_system(args.question)
@@ -335,9 +566,9 @@ def main():
     print(f"[系统] {detected}")
     print()
 
-    # 搜索（带系统过滤）
+    # 搜索（关键词 + 向量混合检索）
     print("[搜索] 调用 lark-cli 搜索...")
-    results = search_with_system_filter(args.question, detected, args.max_results)
+    results = search_with_hybrid(args.question, detected, args.max_results)
 
     if not results:
         print("[未找到相关文档]")
@@ -376,6 +607,17 @@ def main():
         print("\n--- 参考文档 ---")
         print("\n".join(sources))
         return
+
+    # 输出一致性检查
+    is_relevant, score = output_filter(args.question, answer)
+    if not is_relevant:
+        print("[输出一致性检查] 答案与问题不相关，重新生成...")
+        answer, error = generate_answer(args.question, context_text)
+        if error:
+            print(f"[错误] 重新生成失败: {error}")
+            print("\n--- 参考文档 ---")
+            print("\n".join(sources))
+            return
 
     print("=" * 50)
     print("答案:")

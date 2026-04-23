@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""
+parse_utils.py: 文档格式解析工具
+支持 PDF、Excel、CSV 等格式的内容提取
+"""
+
+import os
+import json
+import tempfile
+import subprocess
+from pathlib import Path
+
+# 尝试导入可选库
+try:
+    import PyPDF2
+    HAS_PYPDF2 = True
+except ImportError:
+    HAS_PYPDF2 = False
+
+try:
+    import openpyxl
+    HAS_OPENPYXL = True
+except ImportError:
+    HAS_OPENPYXL = False
+
+try:
+    import pandas as pd
+    HAS_PANDAS = True
+except ImportError:
+    HAS_PANDAS = False
+
+
+def download_file(token, output_path):
+    """使用 lark-cli 下载文件到本地
+
+    返回: (success, error_msg)
+    """
+    cmd = f'lark-cli drive files download --file-token "{token}" --output "{output_path}"'
+    result = subprocess.run(
+        cmd,
+        shell=True,
+        capture_output=True,
+        text=True
+    )
+    return result.returncode == 0, result.stderr if result.returncode != 0 else ""
+
+
+def parse_pdf(file_path, max_chars=500):
+    """解析 PDF 文件，返回纯文本
+
+    Args:
+        file_path: PDF 文件路径
+        max_chars: 最大提取字符数
+
+    Returns:
+        (content, error_msg)
+    """
+    if not HAS_PYPDF2:
+        return "", "未安装 PyPDF2，请运行: pip install PyPDF2"
+
+    try:
+        text = []
+        with open(file_path, 'rb') as f:
+            reader = PyPDF2.PdfReader(f)
+            for page in reader.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text.append(page_text)
+                    if sum(len(t) for t in text) > max_chars:
+                        break
+
+        content = "\n".join(text)[:max_chars]
+        return content, None
+    except Exception as e:
+        return "", f"PDF 解析失败: {e}"
+
+
+def parse_excel(file_path, max_chars=500):
+    """解析 Excel 文件，返回纯文本
+
+    Args:
+        file_path: Excel 文件路径
+        max_chars: 最大提取字符数
+
+    Returns:
+        (content, error_msg)
+    """
+    if not HAS_OPENPYXL:
+        return "", "未安装 openpyxl，请运行: pip install openpyxl"
+
+    try:
+        text_parts = []
+        wb = openpyxl.load_workbook(file_path, data_only=True)
+
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            text_parts.append(f"=== Sheet: {sheet_name} ===")
+
+            for row in ws.iter_rows(values_only=True):
+                # 过滤 None 值，拼接行
+                row_text = " | ".join(str(cell) for cell in row if cell is not None)
+                if row_text.strip():
+                    text_parts.append(row_text)
+
+                if sum(len(t) for t in text_parts) > max_chars:
+                    break
+
+        content = "\n".join(text_parts)[:max_chars]
+        return content, None
+    except Exception as e:
+        return "", f"Excel 解析失败: {e}"
+
+
+def parse_csv(file_path, max_chars=500):
+    """解析 CSV 文件，返回纯文本
+
+    Args:
+        file_path: CSV 文件路径
+        max_chars: 最大提取字符数
+
+    Returns:
+        (content, error_msg)
+    """
+    if not HAS_PANDAS:
+        return "", "未安装 pandas，请运行: pip install pandas"
+
+    try:
+        df = pd.read_csv(file_path)
+        content = df.to_string(max_chars=max_chars)
+        return content[:max_chars], None
+    except Exception as e:
+        return "", f"CSV 解析失败: {e}"
+
+
+def parse_document(token, doc_type, max_chars=500):
+    """统一文档解析入口
+
+    支持类型: PDF, XLSX, XLS, CSV, DOCX, DOC
+
+    Returns:
+        (content, error_msg)
+    """
+    if doc_type in ("PDF",):
+        # PDF 需要先下载再解析
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, f"{token}.pdf")
+            success, err = download_file(token, output_path)
+            if not success:
+                return "", f"下载失败: {err}"
+            return parse_pdf(output_path, max_chars)
+
+    elif doc_type in ("XLSX", "XLS"):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, f"{token}.xlsx")
+            success, err = download_file(token, output_path)
+            if not success:
+                return "", f"下载失败: {err}"
+            return parse_excel(output_path, max_chars)
+
+    elif doc_type in ("CSV",):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, f"{token}.csv")
+            success, err = download_file(token, output_path)
+            if not success:
+                return "", f"下载失败: {err}"
+            return parse_csv(output_path, max_chars)
+
+    else:
+        return "", f"不支持的文档类型: {doc_type}"
+
+
+def main():
+    """测试解析功能"""
+    print("=== parse_utils.py 测试 ===")
+    print(f"PyPDF2: {'已安装' if HAS_PYPDF2 else '未安装'}")
+    print(f"openpyxl: {'已安装' if HAS_OPENPYXL else '未安装'}")
+    print(f"pandas: {'已安装' if HAS_PANDAS else '未安装'}")
+    print()
+    print("用法:")
+    print("  from parse_utils import parse_document")
+    print("  content, err = parse_document(token, 'PDF', max_chars=500)")
+
+
+if __name__ == "__main__":
+    main()
