@@ -50,7 +50,7 @@ def get_file_token_from_doc(doc_token):
 
     try:
         data = json.loads(result.stdout)
-        if data.get("ok"):
+        if data.get("code") == 0:
             # 从 node 数据中获取 file_token
             node = data.get("data", {}).get("node", {})
             file_token = node.get("file_token", "")
