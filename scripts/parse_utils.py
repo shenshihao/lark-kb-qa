@@ -37,7 +37,8 @@ def get_file_token_from_doc(doc_token):
 
     返回: (file_token, error_msg)
     """
-    cmd = f'lark-cli drive files get_metadata --doc-token "{doc_token}" --format json'
+    # 使用 wiki spaces get_node 获取文件元数据
+    cmd = f'lark-cli wiki spaces get_node --params \'{{"token":"{doc_token}"}}\''
     result = subprocess.run(
         cmd,
         shell=True,
@@ -50,7 +51,9 @@ def get_file_token_from_doc(doc_token):
     try:
         data = json.loads(result.stdout)
         if data.get("ok"):
-            file_token = data.get("data", {}).get("file_token", "")
+            # 从 node 数据中获取 file_token
+            node = data.get("data", {}).get("node", {})
+            file_token = node.get("file_token", "")
             if file_token:
                 return file_token, ""
             return "", "未找到 file_token"
@@ -64,7 +67,8 @@ def download_file(file_token, output_path):
 
     返回: (success, error_msg)
     """
-    cmd = f'lark-cli drive files download --file-token "{file_token}" --output "{output_path}"'
+    # 正确命令: lark-cli drive +download --file-token
+    cmd = f'lark-cli drive +download --file-token "{file_token}" --output "{output_path}"'
     result = subprocess.run(
         cmd,
         shell=True,
