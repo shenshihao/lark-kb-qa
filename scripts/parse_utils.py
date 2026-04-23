@@ -62,13 +62,17 @@ def get_file_token_from_doc(doc_token):
         return "", f"解析元数据失败: {result.stdout}"
 
 
-def download_file(file_token, output_path):
+def download_file(file_token, output_filename):
     """使用 lark-cli 下载文件到本地
+
+    Args:
+        file_token: 文件 token
+        output_filename: 相对文件名（不含路径，lark-cli 要求相对路径）
 
     返回: (success, error_msg)
     """
-    # 正确命令: lark-cli drive +download --file-token
-    cmd = f'lark-cli drive +download --file-token "{file_token}" --output "{output_path}"'
+    # lark-cli 要求相对路径，不能是 /tmp/xxx
+    cmd = f'lark-cli drive +download --file-token "{file_token}" --output "{output_filename}"'
     result = subprocess.run(
         cmd,
         shell=True,
@@ -76,6 +80,15 @@ def download_file(file_token, output_path):
         text=True
     )
     return result.returncode == 0, result.stderr if result.returncode != 0 else ""
+
+
+def cleanup_file(filename):
+    """清理下载的文件"""
+    try:
+        if os.path.exists(filename):
+            os.remove(filename)
+    except:
+        pass
 
 
 def parse_pdf(file_path, max_chars=500):
@@ -180,12 +193,15 @@ def parse_document(doc_token, doc_type, max_chars=500):
     """
     if doc_type in ("PDF",):
         # PDF 需要先下载再解析
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output_path = os.path.join(tmpdir, f"{doc_token}.pdf")
-            success, err = download_file(doc_token, output_path)
-            if not success:
-                return "", f"下载失败: {err}"
-            return parse_pdf(output_path, max_chars)
+        output_filename = f"{doc_token}.pdf"
+        success, err = download_file(doc_token, output_filename)
+        if not success:
+            return "", f"下载失败: {err}"
+        try:
+            content, err = parse_pdf(output_filename, max_chars)
+            return content, err
+        finally:
+            cleanup_file(output_filename)
 
     elif doc_type in ("XLSX", "XLS"):
         # xlsx 文件需要先获取 file_token
@@ -193,12 +209,15 @@ def parse_document(doc_token, doc_type, max_chars=500):
         if err:
             return "", f"获取 file_token 失败: {err}"
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output_path = os.path.join(tmpdir, f"{file_token}.xlsx")
-            success, err = download_file(file_token, output_path)
-            if not success:
-                return "", f"下载失败: {err}"
-            return parse_excel(output_path, max_chars)
+        output_filename = f"{file_token}.xlsx"
+        success, err = download_file(file_token, output_filename)
+        if not success:
+            return "", f"下载失败: {err}"
+        try:
+            content, err = parse_excel(output_filename, max_chars)
+            return content, err
+        finally:
+            cleanup_file(output_filename)
 
     elif doc_type in ("CSV",):
         # CSV 也需要先获取 file_token
@@ -206,12 +225,15 @@ def parse_document(doc_token, doc_type, max_chars=500):
         if err:
             return "", f"获取 file_token 失败: {err}"
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output_path = os.path.join(tmpdir, f"{file_token}.csv")
-            success, err = download_file(file_token, output_path)
-            if not success:
-                return "", f"下载失败: {err}"
-            return parse_csv(output_path, max_chars)
+        output_filename = f"{file_token}.csv"
+        success, err = download_file(file_token, output_filename)
+        if not success:
+            return "", f"下载失败: {err}"
+        try:
+            content, err = parse_csv(output_filename, max_chars)
+            return content, err
+        finally:
+            cleanup_file(output_filename)
 
     else:
         return "", f"不支持的文档类型: {doc_type}"
