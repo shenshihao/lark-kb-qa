@@ -53,10 +53,11 @@ def get_file_token_from_doc(doc_token):
         if data.get("code") == 0:
             # 从 node 数据中获取 file_token
             node = data.get("data", {}).get("node", {})
-            file_token = node.get("file_token", "")
+            # obj_token 才是真正的 file_token，file_token 字段可能是空的
+            file_token = node.get("obj_token", "") or node.get("file_token", "")
             if file_token:
                 return file_token, ""
-            return "", "未找到 file_token"
+            return "", "未找到 obj_token 或 file_token"
         return "", f"API 错误: {data}"
     except json.JSONDecodeError:
         return "", f"解析元数据失败: {result.stdout}"
