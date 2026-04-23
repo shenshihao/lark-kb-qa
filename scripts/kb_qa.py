@@ -309,6 +309,7 @@ def search_lark_cli(query, system="all", max_results=10):
                     "url": meta.get("url", ""),
                     "token": meta.get("token", ""),
                     "doc_type": meta.get("doc_types", ""),
+                    "file_type": meta.get("file_type", ""),
                     "summary": item.get("summary_highlighted", ""),
                 })
         return results, None
@@ -374,8 +375,14 @@ def search_with_retry(question, system="all", max_results=5, max_retries=1):
     return []
 
 
-def fetch_document_content(doc_token, doc_type):
-    """获取文档内容"""
+def fetch_document_content(doc_token, doc_type, file_type=""):
+    """获取文档内容
+
+    Args:
+        doc_token: 文档 token
+        doc_type: 文档类型 (DOCX, DOC, FILE, SHEET, WIKI, PDF, XLSX, XLS, CSV)
+        file_type: 文件类型 (当 doc_type=FILE 时，用于区分 xlsx/docx/pdf)
+    """
     if doc_type == "WIKI":
         get_node_cmd = f'lark-cli wiki spaces get_node --params \'{{"token":"{doc_token}"}}\''
         stdout, stderr, code = run_command(get_node_cmd)
@@ -385,6 +392,7 @@ def fetch_document_content(doc_token, doc_type):
                 if node_data.get("ok"):
                     doc_token = node_data["data"]["node"]["obj_token"]
                     doc_type = node_data["data"]["node"]["obj_type"].upper()
+                    file_type = node_data["data"]["node"].get("file_type", "")
             except:
                 pass
 
@@ -400,7 +408,54 @@ def fetch_document_content(doc_token, doc_type):
             except:
                 pass
 
-    # PDF/Excel 等格式，使用 parse_utils
+    # FILE 类型：需要根据 file_type 判断
+    if doc_type == "FILE":
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from scripts.parse_utils import parse_document
+
+        # file_type 为空时，默认尝试获取元数据判断
+        if not file_type:
+            from scripts.parse_utils import get_file_token_from_doc
+            file_token, err = get_file_token_from_doc(doc_token)
+            if err:
+                return "", f"获取 file_token 失败: {err}"
+            # file_type 未知时，先尝试 xlsx
+            return parse_document(doc_token, "XLSX", max_chars=1000)
+
+        # 根据 file_type 分发
+        if file_type.lower() in ("xlsx", "xls"):
+            return parse_document(doc_token, "XLSX", max_chars=1000)
+        elif file_type.lower() == "pdf":
+            return parse_document(doc_token, "PDF", max_chars=1000)
+        elif file_type.lower() == "csv":
+            return parse_document(doc_token, "CSV", max_chars=1000)
+        elif file_type.lower() == "docx":
+            # docx 走 docs +fetch
+            cmd = f'lark-cli docs +fetch --doc {doc_token} --format json'
+            stdout, stderr, code = run_command(cmd)
+            if code == 0:
+                try:
+                    data = json.loads(stdout)
+                    if data.get("ok"):
+                        content = data.get("data", {}).get("markdown", "")[:4000]
+                        return content, None
+                except:
+                    pass
+            return "", f"docx 文件获取失败"
+        else:
+            return "", f"不支持的 FILE 类型: {file_type}"
+
+    # SHEET 类型：飞书多维表格
+    if doc_type == "SHEET":
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from scripts.parse_utils import parse_document
+        return parse_document(doc_token, "XLSX", max_chars=1000)
+
+    # PDF/Excel/CSV 格式，使用 parse_utils
     if doc_type in ("PDF", "XLSX", "XLS", "CSV"):
         import sys
         from pathlib import Path
@@ -583,7 +638,7 @@ def main():
 
     for i, doc in enumerate(results, 1):
         print(f"  [{i}] {doc['title']}")
-        content, error = fetch_document_content(doc["token"], doc["doc_type"])
+        content, error = fetch_document_content(doc["token"], doc["doc_type"], doc.get("file_type", ""))
         if content:
             contexts.append(f"【{doc['title']}】\n{content[:1000]}...")
             sources.append(f"- {doc['title']}: {doc['url']}")
