@@ -176,8 +176,9 @@ def generate_search_queries(question, system):
         )
         with urllib.request.urlopen(req, timeout=30) as response:
             result = json.loads(response.read().decode('utf-8'))
-            if result.get("content"):
-                queries = result["content"][0]["text"].strip().split('\n')
+            text, err = parse_llm_response(result)
+            if not err:
+                queries = text.strip().split('\n')
                 return [q.strip() for q in queries if q.strip()][:6]
     except:
         pass
@@ -467,6 +468,50 @@ def fetch_document_content(doc_token, doc_type, file_type=""):
     return "", f"不支持的文档类型或获取失败: {doc_type}"
 
 
+def parse_llm_response(result):
+    """解析 LLM API 返回的响应，支持多种格式
+
+    支持的格式：
+    - {"content": [{"text": "答案"}]}  // 标准格式
+    - {"content": "答案"}              // 直接字符串
+    - {"text": "答案"}                  // text 字段
+    - {"content": [{"type": "text", "text": "答案"}]}  // Anthropic 格式
+
+    返回: (text, error_msg)
+    """
+    if not result:
+        return None, "空响应"
+
+    # 情况1: 标准格式 {"content": [{"text": "..."}]}
+    if isinstance(result.get("content"), list) and result["content"]:
+        first_item = result["content"][0]
+        if isinstance(first_item, dict):
+            # 支持多种内层格式
+            text = first_item.get("text") or first_item.get("content")
+            if text:
+                return text, None
+        elif isinstance(first_item, str):
+            return first_item, None
+
+    # 情况2: {"content": "直接字符串"}
+    if isinstance(result.get("content"), str):
+        return result["content"], None
+
+    # 情况3: {"text": "答案"}
+    if isinstance(result.get("text"), str):
+        return result["text"], None
+
+    # 情况4: Anthropic 格式 {"content": [{"type": "text", "text": "..."}]}
+    if isinstance(result.get("content"), list) and result["content"]:
+        for item in result["content"]:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text = item.get("text")
+                if text:
+                    return text, None
+
+    return None, f"无法解析响应格式: {str(result)[:200]}"
+
+
 def generate_answer(question, context):
     """调用 MiniMax LLM 生成答案（增强版 Prompt）"""
     if not MINIMAX_API_KEY:
@@ -520,9 +565,10 @@ def generate_answer(question, context):
         )
         with urllib.request.urlopen(req, timeout=30) as response:
             result = json.loads(response.read().decode('utf-8'))
-            if result.get("content"):
-                return result["content"][0]["text"], None
-            return None, "LLM 返回格式错误"
+            text, err = parse_llm_response(result)
+            if err:
+                return None, f"LLM 返回格式错误: {err}"
+            return text, None
     except urllib.error.HTTPError as e:
         error_body = e.read().decode('utf-8') if e.fp else str(e)
         return None, f"API 请求失败: {e.code} - {error_body}"
@@ -581,11 +627,14 @@ def output_filter(question, answer):
         )
         with urllib.request.urlopen(req, timeout=15) as response:
             result = json.loads(response.read().decode('utf-8'))
-            if result.get("content"):
-                response_text = result["content"][0]["text"].strip().upper()
-                is_relevant = "YES" in response_text
-                score = 1.0 if is_relevant else 0.0
-                return is_relevant, score
+            text, err = parse_llm_response(result)
+            if err:
+                # 解析失败时默认通过，避免阻塞
+                return True, 1.0
+            response_text = text.strip().upper()
+            is_relevant = "YES" in response_text
+            score = 1.0 if is_relevant else 0.0
+            return is_relevant, score
     except:
         pass
 
