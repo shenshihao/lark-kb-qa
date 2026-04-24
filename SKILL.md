@@ -1,7 +1,7 @@
 ---
 name: lark-kb-qa
-version: 3.0.0
-description: "飞书知识库问答：基于知识库文档的 RAG 问答。当用户提问业务问题、技术问题时，先检索相关文档，再结合 LLM 生成答案。"
+version: 3.1.0
+description: "飞书知识库问答：基于知识库文档的 RAG 问答。当用户提问业务问题、技术问题时，先检索知识库文档，再结合 LLM 生成答案。"
 trigger_keywords: "知识库、查询、怎么用、如何、是什么、多少、哪里、请问、教我、为什么、怎么查、帮我查查、看一下、看看、帮我看看、规则、条件、流程、说明、手续、限制、禁止、禁用、报错、错误、失败、异常、问题、如何办、怎么办、如何处理、如何解决、融资、融券、开仓、平仓、补仓、追保、交易、买入、卖出、认购、申购、赎回、委托、下单、撤单、改单、账户、账号、席位、保证金、征信、利息、负债、合约、净资产、授信、额度、风控、预警、平仓线、警戒线、维持担保比例、折算率、折算比例、担保比例、可用余额、可取余额、资金余额、现金、股份、持仓、市值、低延时、顶点、撮合、symbol、agw、柜台、节点、席位号、交易时段、申报、业务时段、禁止申报、禁用、顶点现货、顶点期货"
 metadata:
   requires:
@@ -9,7 +9,7 @@ metadata:
   cliHelp: "python scripts/kb_qa.py --help"
 ---
 
-# kb（知识库问答）
+# lark-kb-qa（知识库问答）
 
 **核心能力：** RAG（检索增强生成）问答。接收用户问题，检索知识库文档，结合 LLM 生成答案。
 
@@ -31,16 +31,22 @@ metadata:
 - 用户问"7100701是什么接口" → LLM 生成：["7100701 接口", "7100701 symbol", "接口 7100701", "7100701 合约"]
 - 用户问"折算率是多少" → LLM 生成：["折算率", "折算比例", "担保比例", "维持担保比例"]
 
-### 3. 本地索引缓存（可选）
-支持预建索引加速搜索：
-```bash
-python scripts/scan_knowledge_base.py --output kb_index.json
-python kb_qa.py --question "问题" --index kb_index.json
-```
+### 3. 本地 BM25 检索（SQLite FTS5）
+- 中文查询分词：按字符边界分割中英文混合查询
+- LIKE 模糊搜索 fallback：FTS5 失败时使用
+- OR 评分逻辑：任一词匹配，按评分排序
+
+### 4. 文件附件全文索引
+支持同步和检索以下文件类型：
+- Excel (.xlsx, .xls)
+- Word (.docx, .doc)
+- PDF (.pdf)
+- PPT (.pptx, .ppt)
+- CSV (.csv)
 
 ## 触发关键词
 
-当用户消息包含以下关键词时，OpenClaw 将自动调用此 Skill：
+当用户消息包含以下关键词时，系统自动触发此 Skill：
 - 通用疑问：知识库、查询、怎么用、如何、是什么、多少、哪里、请问、教我、为什么、怎么查、帮我查查、看一下、看看、帮我看看
 - 业务操作：规则、条件、流程、说明、手续、限制、禁止、禁用
 - 故障排除：报错、错误、失败、异常、问题、错误码、如何办、怎么办、如何处理、如何解决
@@ -62,21 +68,104 @@ python kb_qa.py --question "问题" --index kb_index.json
 ## 安装
 
 ```bash
-# 复制到 OpenClaw 服务器
-scp -r lark-kb-qa user@server:~/.openclaw/skills/
+# 克隆代码
+git clone https://github.com/shenshihao/lark-kb-qa.git
+cd lark-kb-qa
 
 # 安装依赖
-pip install -r lark-kb-qa/requirements.txt
+pip install -r requirements.txt
 
 # 设置环境变量
 export MINIMAX_API_KEY="your-minimax-api-key"
-export JINA_API_KEY="your-jina-api-key"   # 用于向量检索（可选）
 
 # 可选：建立本地向量索引（加速语义搜索）
-# 1. 先扫描知识库文档
-python scripts/scan_knowledge_base.py --output kb_index.json
-# 2. 向量化文档
 python scripts/embedding_cache.py --build
+```
+
+## 本地 BM25 索引
+
+### 初始化索引（全量同步）
+
+```bash
+# 同步整个知识库到本地 SQLite
+python scripts/sync_wiki.py --full
+
+# 查看索引状态
+python scripts/sync_wiki.py --stats
+```
+
+**输出示例**：
+```
+=== 索引统计 ===
+文档数: 23
+块数: 499
+同义词数: 0
+数据库大小: 1.03 MB
+```
+
+### 增量同步单个文档
+
+```bash
+# 同步前先通过 lark-cli 搜索确认文档 token
+lark-cli docs +search --query "文档标题关键词"
+
+# 增量同步（会自动覆盖已有文档）
+python scripts/sync_wiki.py --doc <doc_token>
+```
+
+### 索引新增文档的正确流程
+
+当知识库新增文档后，需要手动同步到本地索引：
+
+1. **搜索文档**：知道文档标题后，用 `lark-cli docs +search` 找到 doc_token
+2. **同步文档**：用 `sync_wiki.py --doc <doc_token>` 增量同步
+3. **验证**：用 `sync_wiki.py --stats` 确认文档数增加
+
+**示例**：
+```bash
+# 1. 找到文档 token
+lark-cli docs +search --query "低延时问题总结"
+# 返回: token: "ZzQNdBDw9ogRvYx7sVpcQcv5npg"
+
+# 2. 同步到本地索引
+python scripts/sync_wiki.py --doc ZzQNdBDw9ogRvYx7sVpcQcv5npg
+
+# 3. 验证
+python scripts/sync_wiki.py --stats
+```
+
+### 手动添加文档到索引（通过 Python）
+
+```python
+import sys, os
+sys.path.insert(0, '.')
+from scripts import bm25_index, text_chunker
+
+# 获取文档内容（通过 lark-cli 或 API）
+doc_id = "你的文档ID"
+doc_title = "文档标题"
+doc_url = "https://feishu.cn/docx/xxx"
+content = "文档内容文本..."
+
+# 分块
+chunks = text_chunker.chunk_document(doc_id, doc_title, content, "native")
+
+# 添加到索引
+bm25_index.add_doc(doc_id=doc_id, doc_title=doc_title, doc_type="native", doc_url=doc_url)
+bm25_index.delete_doc_chunks(doc_id)  # 删除旧块（如有）
+bm25_index.add_chunks(chunks)
+
+print(f"已索引 {len(chunks)} 个分块")
+```
+
+### 查询测试
+
+```bash
+# 本地搜索测试
+python scripts/kb_qa.py --question "顶点503错误码" --use-bm25
+
+# 不使用本地索引，直接搜索飞书
+python scripts/kb_qa.py --question "顶点503错误码"
 ```
 
 ## 向量检索（可选）
@@ -88,32 +177,6 @@ python scripts/embedding_cache.py --build
 3. 运行 `python scripts/embedding_cache.py --build` 建立向量索引
 
 **优势：** 能找到表达不同但语义相似的文档（如"加杠杆"匹配"融资买入"）
-
-## 本地 BM25 检索（可选）
-
-使用 SQLite FTS5 实现本地全文检索，替代第三方向量 API：
-
-```bash
-# 1. 全量同步知识库到本地索引
-python scripts/sync_wiki.py --full
-
-# 2. 查看索引统计
-python scripts/sync_wiki.py --stats
-
-# 3. 使用 BM25 检索
-python scripts/kb_qa.py --question "低延时委托方式" --use-bm25
-```
-
-**优势：**
-- 零第三方依赖，无需 Jina API
-- 查询延迟 < 100ms
-- 支持同义词扩展
-- 支持标题权重提升
-
-**架构：**
-- SQLite FTS5 BM25 全文索引
-- 文本按段落/标题分块（500-1000字/块）
-- 多路召回 + 合并去重
 
 ## 使用方法
 
@@ -164,28 +227,74 @@ python scripts/kb_qa.py --question "低延时委托方式" --use-bm25
 | LLM 模型 | MiniMax-M2.7 |
 | LLM API | https://api.minimaxi.com/anthropic |
 
+## 架构
+
+```
+lark-kb-qa/
+├── SKILL.md                      # 本文档
+├── requirements.txt              # Python 依赖
+├── agent/
+│   └── SOUL.md                   # Agent 角色定义
+├── references/
+│   └── lark-kb-qa.md            # 参考资料
+└── scripts/
+    ├── kb_qa.py                 # 主问答脚本
+    ├── bm25_index.py            # BM25 索引模块（SQLite FTS5）
+    ├── text_chunker.py          # 文本分块模块
+    ├── doc_parser.py            # 文档解析模块（Excel/Word/PDF/PPT）
+    ├── sync_wiki.py             # Wiki 同步脚本
+    ├── embedding_cache.py      # 向量索引（可选）
+    └── scan_knowledge_base.py   # 索引扫描脚本（旧版）
+```
+
+### 核心模块
+
+| 模块 | 职责 |
+|------|------|
+| `bm25_index.py` | SQLite FTS5 全文索引：添加/删除文档、分块、搜索 |
+| `text_chunker.py` | 按段落/标题分块（500-1000字/块），提取标题作为块标题 |
+| `doc_parser.py` | 解析 Excel/Word/PDF/PPT，提取纯文本内容 |
+| `sync_wiki.py` | 遍历知识库节点，下载文件并建立索引 |
+| `kb_qa.py` | 主流程：路由+LLM扩展+检索+生成答案 |
+
+### BM25 搜索逻辑
+
+```
+search_like(query)
+  → 分词：re.findall 中文+英文分割
+  → SQL LIKE (OR 逻辑，任一匹配)
+  → Python 评分排序
+  → 返回 top_k 结果
+```
+
+### 新增文档索引流程
+
+```
+发现新文档
+  → lark-cli docs +search 找到 token
+  → lark-cli docs +fetch 获取内容
+  → text_chunker.chunk_document 分块
+  → bm25_index.add_doc + add_chunks
+  → 完成
+```
+
+## 常见问题
+
+### Q: 搜索"顶点503"找不到结果
+A: 中文查询会被分割为 ["顶点", "503"]，在数据库中搜索任一词匹配的内容。内容已确认存在：`HTS_ERR_AlreadyExistTradeAcc | -503 | 交易账户已存在`
+
+### Q: 新增文档后本地索引搜不到
+A: 需要手动执行 `python scripts/sync_wiki.py --doc <doc_token>` 增量同步。详见上方"索引新增文档的正确流程"
+
+### Q: FTS5 检索失败怎么办
+A: `search_like()` 会作为 fallback 自动启用，使用 LIKE 模糊搜索，不依赖 FTS5
+
+### Q: 如何清空索引
+A: `python scripts/sync_wiki.py --clear`，然后输入 `yes` 确认
+
 ## 权限
 
 | 操作 | 所需 scope |
 |------|-----------|
 | 搜索云空间对象 | `search:docs:read` |
 | 读取文档内容 | `docx:document:read` |
-
-## 文件结构
-
-```
-lark-kb-qa/
-├── SKILL.md
-├── agent/
-│   └── SOUL.md
-├── references/
-│   └── lark-kb-qa.md
-└── scripts/
-    ├── kb_qa.py              # 主问答脚本
-    ├── bm25_index.py         # BM25 索引模块（SQLite FTS5）
-    ├── text_chunker.py      # 文本分块模块
-    ├── doc_parser.py         # 文档解析模块（Excel/Word/PDF/PPT）
-    ├── sync_wiki.py         # Wiki 同步脚本
-    ├── embedding_cache.py    # 向量索引（可选）
-    └── scan_knowledge_base.py # 索引扫描脚本（旧版）
-```
