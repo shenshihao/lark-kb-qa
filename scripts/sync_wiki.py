@@ -35,7 +35,9 @@ def run_command(cmd):
 
 def get_wiki_nodes(space_id: str) -> list:
     """获取知识库根节点下的所有节点"""
-    cmd = f"lark-cli wiki nodes list --params \"{{\\\"space_id\\\":\\\"{space_id}\\\"}}\""
+    params = {"space_id": space_id}
+    params_str = json.dumps(params).replace('"', '\\"')
+    cmd = f"lark-cli wiki nodes list --params \"{params_str}\""
     stdout, stderr, code = run_command(cmd)
 
     if code != 0:
@@ -88,7 +90,7 @@ def get_doc_info(doc_token: str) -> dict:
 
     try:
         data = json.loads(stdout)
-        if data.get("ok"):
+        if data.get("code") == 0:
             return {
                 "doc_id": doc_token,
                 "doc_title": data.get("data", {}).get("title", ""),
@@ -152,6 +154,9 @@ def download_file(file_token: str, output_filename: str) -> tuple:
 
     Returns: (success, error_msg)
     """
+    # 确保使用相对路径（lark-cli 要求）
+    if not output_filename.startswith('./'):
+        output_filename = './' + output_filename
     cmd = f'lark-cli drive +download --file-token "{file_token}" --output "{output_filename}" --overwrite'
     result = subprocess.run(
         cmd,
@@ -291,6 +296,8 @@ def index_file_document(file_info: dict) -> bool:
 
     # 构建下载文件名（使用相对路径，lark-cli 要求）
     output_filename = f"{file_token}.{file_ext}"
+    if not output_filename.startswith('./'):
+        output_filename = './' + output_filename
 
     # 下载文件（lark-cli 要求相对路径）
     cmd = f'lark-cli drive +download --file-token "{file_token}" --output "{output_filename}" --overwrite'
