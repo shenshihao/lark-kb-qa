@@ -211,12 +211,103 @@ def search_bm25(query, top_k=10, doc_id=None):
     return results[:top_k]
 
 
+def search_like(query, top_k=10, doc_id=None):
+    """LIKE 模糊搜索（备选方案，当 FTS5 失败时使用）
+
+    Args:
+        query: 搜索查询
+        top_k: 返回前 k 条结果
+        doc_id: 可选，限定在指定文档内搜索
+
+    Returns:
+        [(chunk_id, doc_id, chunk_index, title, content, score), ...]
+    """
+    conn = get_db()
+    cursor = conn.cursor()
+
+    # 分解查询词（支持多词空格分隔）
+    # 对于中文查询，还需要按非字母数字字符分割（如"顶点503" → ["顶点", "503"]）
+    terms = query.split()
+    # 按非字母数字字符进一步分割中文查询
+    import re
+    additional_terms = []
+    for term in terms:
+        # 使用 findall 分别提取中文和英文字符序列
+        # [一-龥] 是常见中文字符范围
+        sub_terms = re.findall(r'[a-zA-Z0-9]+|[一-龥]+', term)
+        additional_terms.extend([t for t in sub_terms if t and len(t) > 0])
+    terms = additional_terms
+
+    like_patterns = [f"%{term}%" for term in terms if term]
+
+    if not like_patterns:
+        return []
+
+    # 构建 LIKE 条件（使用 OR，任一词匹配即可，评分排序）
+    like_conditions = " OR ".join(["(c.content LIKE ? OR c.title LIKE ?)"] * len(terms))
+    params = []
+    for term in terms:
+        params.extend([f"%{term}%", f"%{term}%"])
+
+    if doc_id:
+        like_conditions = f"({like_conditions}) AND c.doc_id = ?"
+        params.append(doc_id)
+
+    # LIKE 检索
+    sql = f"""
+        SELECT
+            c.chunk_id,
+            c.doc_id,
+            c.chunk_index,
+            c.title,
+            c.content,
+            c.is_title_chunk,
+            0.0 as score,
+            d.doc_title,
+            d.doc_url
+        FROM kb_chunks c
+        JOIN kb_docs d ON c.doc_id = d.doc_id
+        WHERE {like_conditions}
+        LIMIT ?
+    """
+    params.append(top_k)
+
+    cursor.execute(sql, params)
+    rows = cursor.fetchall()
+
+    # 应用标题权重
+    results = []
+    for row in rows:
+        score = 0.0
+        if row["is_title_chunk"]:
+            score = 0.5
+        # 按内容匹配度简单评分
+        content_lower = row["content"].lower() if row["content"] else ""
+        for term in terms:
+            if term.lower() in content_lower:
+                score += 1.0
+        results.append((
+            row["chunk_id"],
+            row["doc_id"],
+            row["chunk_index"],
+            row["title"],
+            row["content"],
+            score,
+            row["doc_title"],
+            row["doc_url"]
+        ))
+
+    results.sort(key=lambda x: x[5], reverse=True)
+    return results[:top_k]
+
+
 def search_with_synonyms(query, top_k=10, doc_id=None):
-    """带同义词展开的 BM25 检索
+    """带同义词展开的 BM25 检索，fallback 到 LIKE 搜索
 
     1. 查询同义词词典展开搜索词
     2. 多路 BM25 并行检索
     3. 合并去重
+    4. 如果 BM25 无结果，fallback 到 LIKE 模糊搜索
     """
     conn = get_db()
     cursor = conn.cursor()
@@ -241,6 +332,18 @@ def search_with_synonyms(query, top_k=10, doc_id=None):
         except Exception as e:
             # 单个查询失败不影响其他查询
             pass
+
+    # 如果 BM25 无结果，fallback 到 LIKE 搜索
+    if not all_results:
+        for q in expanded_queries:
+            try:
+                results = search_like(q, top_k=top_k * 2, doc_id=doc_id)
+                for r in results:
+                    chunk_key = (r[0], r[1], r[2])
+                    if chunk_key not in all_results or r[5] > all_results[chunk_key][5]:
+                        all_results[chunk_key] = r
+            except Exception as e:
+                pass
 
     # 按分数排序返回 top_k
     sorted_results = sorted(all_results.values(), key=lambda x: x[5], reverse=True)
