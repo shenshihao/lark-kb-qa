@@ -1,6 +1,6 @@
 ---
 name: lark-kb-qa
-version: 2.0.0
+version: 3.0.0
 description: "飞书知识库问答：基于知识库文档的 RAG 问答。当用户提问业务问题、技术问题时，先检索相关文档，再结合 LLM 生成答案。"
 trigger_keywords: "知识库、查询、怎么用、如何、是什么、多少、哪里、请问、教我、为什么、怎么查、帮我查查、看一下、看看、帮我看看、规则、条件、流程、说明、手续、限制、禁止、禁用、报错、错误、失败、异常、问题、如何办、怎么办、如何处理、如何解决、融资、融券、开仓、平仓、补仓、追保、交易、买入、卖出、认购、申购、赎回、委托、下单、撤单、改单、账户、账号、席位、保证金、征信、利息、负债、合约、净资产、授信、额度、风控、预警、平仓线、警戒线、维持担保比例、折算率、折算比例、担保比例、可用余额、可取余额、资金余额、现金、股份、持仓、市值、低延时、顶点、撮合、symbol、agw、柜台、节点、席位号、交易时段、申报、业务时段、禁止申报、禁用、顶点现货、顶点期货"
 metadata:
@@ -89,6 +89,32 @@ python scripts/embedding_cache.py --build
 
 **优势：** 能找到表达不同但语义相似的文档（如"加杠杆"匹配"融资买入"）
 
+## 本地 BM25 检索（可选）
+
+使用 SQLite FTS5 实现本地全文检索，替代第三方向量 API：
+
+```bash
+# 1. 全量同步知识库到本地索引
+python scripts/sync_wiki.py --full
+
+# 2. 查看索引统计
+python scripts/sync_wiki.py --stats
+
+# 3. 使用 BM25 检索
+python scripts/kb_qa.py --question "低延时委托方式" --use-bm25
+```
+
+**优势：**
+- 零第三方依赖，无需 Jina API
+- 查询延迟 < 100ms
+- 支持同义词扩展
+- 支持标题权重提升
+
+**架构：**
+- SQLite FTS5 BM25 全文索引
+- 文本按段落/标题分块（500-1000字/块）
+- 多路召回 + 合并去重
+
 ## 使用方法
 
 用户直接提问即可自动触发，例如：
@@ -107,6 +133,7 @@ python scripts/embedding_cache.py --build
 | `--max-results` | 最大检索文档数（默认 5） |
 | `--api-key` | MiniMax API Key（也可通过环境变量 `MINIMAX_API_KEY` 设置） |
 | `--index` | 本地索引文件路径（可选，用于加速） |
+| `--use-bm25` | 使用本地 BM25 检索（需先运行 sync_wiki.py --full 建立索引） |
 
 ## 输出格式
 
@@ -122,8 +149,12 @@ python scripts/embedding_cache.py --build
 - PyPDF2（PDF 解析，可选）
 - openpyxl（Excel 解析，可选）
 - pandas（CSV 解析，可选）
+- python-docx（Word 解析，可选）
+- pdfplumber（PDF 深度解析，可选）
+- python-pptx（PPT 解析，可选）
 - MiniMax API Key（用于 LLM 查询扩展和答案生成）
 - Jina API Key（可选，用于向量检索）
+- SQLite FTS5（内置，无需安装，用于 BM25 检索）
 
 ## 知识库配置
 
@@ -151,5 +182,10 @@ lark-kb-qa/
 │   └── lark-kb-qa.md
 └── scripts/
     ├── kb_qa.py              # 主问答脚本
-    └── scan_knowledge_base.py # 索引扫描脚本（可选）
+    ├── bm25_index.py         # BM25 索引模块（SQLite FTS5）
+    ├── text_chunker.py      # 文本分块模块
+    ├── doc_parser.py         # 文档解析模块（Excel/Word/PDF/PPT）
+    ├── sync_wiki.py         # Wiki 同步脚本
+    ├── embedding_cache.py    # 向量索引（可选）
+    └── scan_knowledge_base.py # 索引扫描脚本（旧版）
 ```

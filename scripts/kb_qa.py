@@ -291,6 +291,86 @@ def search_with_hybrid(question, system="all", max_results=5):
     return merged[:max_results]
 
 
+def search_with_bm25(question, system="all", max_results=5):
+    """BM25 本地检索
+
+    使用 SQLite FTS5 BM25 全文索引检索文档。
+    需要先通过 sync_wiki.py 建立索引。
+
+    Args:
+        question: 用户问题
+        system: 系统分类 (低延时/顶点/all)
+        max_results: 最大返回结果数
+
+    Returns:
+        [{title, url, token, doc_type, summary, score, source}, ...]
+    """
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+
+    try:
+        from scripts import bm25_index
+
+        # 检查索引是否存在
+        stats = bm25_index.get_stats()
+        if stats["doc_count"] == 0:
+            print("[BM25] 索引为空，请先运行 sync_wiki.py --full 建立索引")
+            return []
+
+        # 生成搜索词（复用现有 LLM 扩展逻辑）
+        queries = generate_search_queries(question, system)
+        print(f"[BM25] 搜索词: {queries[:3]}...")
+
+        # 多路召回
+        all_results = {}
+        for query in queries:
+            try:
+                results = bm25_index.search_with_synonyms(query, top_k=max_results * 2)
+                for r in results:
+                    # r = (chunk_id, doc_id, chunk_index, title, content, score, doc_title, doc_url)
+                    title = r[6] or r[3]  # doc_title or title
+                    token = r[1]  # doc_id
+                    url = r[7] or f"https://Feishu.cn/docx/{token}"  # doc_url
+
+                    if title not in all_results or r[5] > all_results[title]["score"]:
+                        all_results[title] = {
+                            "title": title,
+                            "url": url,
+                            "token": token,
+                            "doc_type": "native",
+                            "summary": r[4][:200] if r[4] else "",  # content preview
+                            "score": r[5],
+                            "source": "bm25"
+                        }
+            except Exception as e:
+                print(f"[BM25] 查询 '{query}' 失败: {e}")
+
+        # 按分数排序
+        merged = list(all_results.values())
+        merged.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+        # 系统过滤（如果需要）
+        if system != "all":
+            system_kws = SYSTEM_TITLE_KEYWORDS.get(system, [])
+            filtered = []
+            for r in merged:
+                matched = any(kw.lower() in r["title"].lower() for kw in system_kws)
+                if matched:
+                    filtered.append(r)
+            merged = filtered
+
+        print(f"[BM25] 找到 {len(merged)} 条结果")
+        return merged[:max_results]
+
+    except ImportError as e:
+        print(f"[BM25] 模块导入失败: {e}")
+        return []
+    except Exception as e:
+        print(f"[BM25] 检索失败: {e}")
+        return []
+
+
 def search_lark_cli(query, system="all", max_results=10):
     """调用 lark-cli 搜索知识库"""
     cmd = f'lark-cli docs +search --query "{query}" --page-size {max_results} --format json'
@@ -648,6 +728,7 @@ def main():
     parser.add_argument("--system", "-s", default="auto", help="系统: 低延时|顶点|all|auto (默认 auto)")
     parser.add_argument("--max-results", "-n", type=int, default=5, help="最大检索文档数")
     parser.add_argument("--api-key", "-k", default=None, help="MiniMax API Key")
+    parser.add_argument("--use-bm25", action="store_true", help="使用本地 BM25 检索（需先建立索引）")
 
     args = parser.parse_args()
 
@@ -671,9 +752,13 @@ def main():
     print(f"[系统] {detected}")
     print()
 
-    # 搜索（关键词 + 向量混合检索）
-    print("[搜索] 调用 lark-cli 搜索...")
-    results = search_with_hybrid(args.question, detected, args.max_results)
+    # 搜索
+    if args.use_bm25:
+        print("[搜索] 使用本地 BM25 检索...")
+        results = search_with_bm25(args.question, detected, args.max_results)
+    else:
+        print("[搜索] 调用 lark-cli 搜索...")
+        results = search_with_hybrid(args.question, detected, args.max_results)
 
     if not results:
         print("[未找到相关文档]")
