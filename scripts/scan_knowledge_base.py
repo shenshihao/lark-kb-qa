@@ -71,7 +71,11 @@ def search_docs(query, space_id=None, page_size=50):
 def fetch_doc_content(token, doc_type):
     """获取文档内容摘要"""
     if doc_type == "WIKI":
-        get_node_cmd = f'lark-cli wiki spaces get_node --params \'{{"token":"{token}"}}\''
+        import platform
+        if platform.system() == 'Windows':
+            get_node_cmd = f'lark-cli wiki spaces get_node --params "{{\\"token\\":\\"{token}\\"}}"'
+        else:
+            get_node_cmd = f"lark-cli wiki spaces get_node --params '{{\\\"token\\\":\\\"{token}\\\"}}'"
         stdout, stderr, code = run_command(get_node_cmd)
         if code == 0:
             try:

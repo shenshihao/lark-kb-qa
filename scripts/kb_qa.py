@@ -190,14 +190,15 @@ def expand_query_fallback(question):
     """备用扩展逻辑"""
     queries = [question]
 
-    # 对数字代码补充上下文
-    numbers = re.findall(r'\d{4,}', question)
+    # 对数字代码补充上下文（支持负数如 -122）
+    numbers = re.findall(r'-?\d+', question)
     for num in numbers:
-        queries.extend([
-            f"{num}",
-            f"接口 {num}",
-            f"委托方式 {num}",
-        ])
+        if len(num) >= 3:  # 至少3位数字
+            queries.extend([
+                f"{num}",
+                f"错误码 {num}",
+                f"接口 {num}",
+            ])
 
     # 对wtfs补充
     if "wtfs" in question.lower():
@@ -385,12 +386,33 @@ def search_lark_cli(query, system="all", max_results=10):
         if data.get("ok") and data.get("data", {}).get("results"):
             for item in data["data"]["results"][:max_results]:
                 meta = item.get("result_meta", {})
+
+                # file_type 在顶层的可能是空，需要从 icon_info 中解析
+                file_type = meta.get("file_type", "")
+                if not file_type:
+                    icon_info_str = meta.get("icon_info", "")
+                    if icon_info_str:
+                        try:
+                            icon_info = json.loads(icon_info_str)
+                            file_type = icon_info.get("file_type", "")
+                        except:
+                            pass
+
+                # 标题优先取 title_highlighted（需要去除 HTML 标签），再回退到 title
+                title = meta.get("title", "")
+                if not title:
+                    title_highlighted = item.get("title_highlighted", "")
+                    if title_highlighted:
+                        # 去除 HTML 标签
+                        import re
+                        title = re.sub(r'<[^>]+>', '', title_highlighted)
+
                 results.append({
-                    "title": meta.get("title", "") or "无标题",
+                    "title": title or "无标题",
                     "url": meta.get("url", ""),
                     "token": meta.get("token", ""),
                     "doc_type": meta.get("doc_types", ""),
-                    "file_type": meta.get("file_type", ""),
+                    "file_type": file_type,
                     "summary": item.get("summary_highlighted", ""),
                 })
         return results, None
@@ -465,7 +487,11 @@ def fetch_document_content(doc_token, doc_type, file_type=""):
         file_type: 文件类型 (当 doc_type=FILE 时，用于区分 xlsx/docx/pdf)
     """
     if doc_type == "WIKI":
-        get_node_cmd = f'lark-cli wiki spaces get_node --params \'{{"token":"{doc_token}"}}\''
+        import platform
+        if platform.system() == 'Windows':
+            get_node_cmd = f'lark-cli wiki spaces get_node --params "{{\\"token\\":\\"{doc_token}\\"}}"'
+        else:
+            get_node_cmd = f"lark-cli wiki spaces get_node --params '{{\\\"token\\\":\\\"{doc_token}\\\"}}'"
         stdout, stderr, code = run_command(get_node_cmd)
         if code == 0:
             try:
@@ -473,7 +499,10 @@ def fetch_document_content(doc_token, doc_type, file_type=""):
                 if node_data.get("ok"):
                     doc_token = node_data["data"]["node"]["obj_token"]
                     doc_type = node_data["data"]["node"]["obj_type"].upper()
-                    file_type = node_data["data"]["node"].get("file_type", "")
+                    # 只有当 node 返回的 file_type 不为空时才覆盖，避免丢失搜索结果中的 file_type
+                    node_file_type = node_data["data"]["node"].get("file_type", "")
+                    if node_file_type:
+                        file_type = node_file_type
             except:
                 pass
 

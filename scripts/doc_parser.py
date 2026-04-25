@@ -42,18 +42,22 @@ def get_file_token_from_doc(doc_token: str) -> Tuple[str, str]:
 
     返回: (file_token, error_msg)
     """
-    cmd = f'lark-cli wiki spaces get_node --params \'{{"token":"{doc_token}"}}\''
+    import platform
+    # Windows 需要双引号包裹 JSON 并转义，Linux/macOS 用单引号即可
+    if platform.system() == 'Windows':
+        cmd = f'lark-cli wiki spaces get_node --params "{{\\"token\\":\\"{doc_token}\\"}}"'
+    else:
+        cmd = f"lark-cli wiki spaces get_node --params '{{\\\"token\\\":\\\"{doc_token}\\\"}}'"
     result = subprocess.run(
         cmd,
         shell=True,
-        capture_output=True,
-        text=True
+        capture_output=True
     )
     if result.returncode != 0:
-        return "", f"获取文件元数据失败: {result.stderr}"
+        return "", f"获取文件元数据失败: {result.stderr.decode('utf-8', errors='replace')}"
 
     try:
-        data = json.loads(result.stdout)
+        data = json.loads(result.stdout.decode('utf-8', errors='replace'))
         if data.get("code") == 0:
             node = data.get("data", {}).get("node", {})
             file_token = node.get("obj_token", "") or node.get("file_token", "")
@@ -61,8 +65,8 @@ def get_file_token_from_doc(doc_token: str) -> Tuple[str, str]:
                 return file_token, ""
             return "", "未找到 obj_token 或 file_token"
         return "", f"API 错误: {data}"
-    except json.JSONDecodeError:
-        return "", f"解析元数据失败: {result.stdout}"
+    except json.JSONDecodeError as e:
+        return "", f"解析元数据失败: {e}"
 
 
 def download_file(file_token: str, output_filename: str) -> Tuple[bool, str]:
