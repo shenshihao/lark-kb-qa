@@ -9,6 +9,7 @@ import json
 import subprocess
 import os
 import time
+import sys
 
 # 知识库配置
 SPACE_IDS = {
@@ -98,6 +99,15 @@ def fetch_doc_content(token, doc_type):
                     return content[:500] if content else ""
             except:
                 pass
+    elif doc_type in ["FILE", "XLSX", "XLS"]:
+        # 直接调用 doc_parser 的解析函数
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        try:
+            from doc_parser import parse_document_from_token
+            content, err = parse_document_from_token(token, doc_type.lower(), max_chars=500)
+            return content[:500] if content else ""
+        except Exception as e:
+            return ""
     return ""
 
 
@@ -105,28 +115,34 @@ def get_all_docs_from_space(space_id, system_name):
     """获取某个知识库空间下的所有文档"""
     docs = []
 
-    # 搜索该系统下的所有文档
-    results = search_docs(f"system:{system_name}", space_id, page_size=100)
-
-    # 也用空查询看能不能获取目录结构
-    if not results:
-        results = search_docs("", space_id, page_size=100)
+    # 获取该 space 下所有文档（用空搜索获取完整列表）
+    results = search_docs("", space_id, page_size=100)
 
     for item in results:
         meta = item.get("result_meta", {})
-        doc_type = meta.get("doc_types", "")
+        # 提取标题：title_highlighted 在 item 顶层，meta 里也有
+        raw_title = meta.get("title", "") or item.get("title_highlighted", "") or meta.get("title_highlighted", "")
+        import re
+        title = re.sub(r'<[^>]+>', '', raw_title).strip()
+
+        url = meta.get("url", "") or item.get("url", "")
+        token = meta.get("token", "") or item.get("token", "")
+        doc_type = meta.get("doc_types", "") or item.get("doc_type", "")
+
+        # 跳过无标题文档
+        if not title:
+            continue
 
         # 获取内容摘要
-        token = meta.get("token", "")
         content_snippet = fetch_doc_content(token, doc_type)
 
         docs.append({
-            "title": meta.get("title", ""),
-            "url": meta.get("url", ""),
+            "title": title,
+            "url": url,
             "token": token,
             "doc_type": doc_type,
             "system": system_name,
-            "content_snippet": content_snippet[:300],  # 截取前300字符
+            "content_snippet": content_snippet[:300],
             "indexed_at": time.strftime("%Y-%m-%d %H:%M:%S")
         })
 

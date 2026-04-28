@@ -242,6 +242,7 @@ def generate_search_queries(question, system):
 def expand_query_fallback(question):
     """备用扩展逻辑"""
     queries = [question]
+    q_lower = question.lower()
 
     # 对数字代码补充上下文（支持负数如 -122）
     numbers = re.findall(r'-?\d+', question)
@@ -254,11 +255,51 @@ def expand_query_fallback(question):
             ])
 
     # 对wtfs补充
-    if "wtfs" in question.lower():
+    if "wtfs" in q_lower:
         queries.extend([
             "wtfs 委托方式",
             "委托方式 wtfs",
             "wtfs",
+        ])
+
+    # HTS 实体词扩展
+    if re.search(r'hts[h]?', q_lower):
+        queries.extend([
+            "HTS",
+            "HTS两融",
+            "顶点HTS",
+        ])
+
+    # 两融 实体词扩展
+    if "两融" in question:
+        queries.extend([
+            "两融",
+            "融资融券",
+            "融资开仓",
+        ])
+
+    # 上场/下场 实体词扩展
+    if re.search(r'[上下]场', question):
+        queries.extend([
+            "上场文件",
+            "下场文件",
+            "两融上下场",
+        ])
+
+    # 负债合约/合约 实体词扩展
+    if "负债合约" in question or "合约" in question:
+        queries.extend([
+            "负债合约",
+            "客户合约",
+            "两融合约",
+        ])
+
+    # symbol 实体词扩展
+    if "symbol" in q_lower:
+        queries.extend([
+            "symbol",
+            "合约",
+            "HT符号",
         ])
 
     return list(set(queries))[:6]
