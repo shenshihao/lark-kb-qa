@@ -42,15 +42,15 @@ def get_file_token_from_doc(doc_token: str) -> Tuple[str, str]:
 
     返回: (file_token, error_msg)
     """
-    import platform
-    # Windows 需要双引号包裹 JSON 并转义，Linux/macOS 用单引号即可
-    if platform.system() == 'Windows':
-        cmd = f'lark-cli wiki spaces get_node --params "{{\\"token\\":\\"{doc_token}\\"}}"'
-    else:
-        cmd = f"lark-cli wiki spaces get_node --params '{{\\\"token\\\":\\\"{doc_token}\\\"}}'"
+    # 参数校验
+    if not doc_token or not doc_token.strip():
+        return "", "doc_token 无效"
+    doc_token = doc_token.strip()[:100]  # 限制长度
+
+    cmd = ["lark-cli", "wiki", "spaces", "get_node", "--params", f'{{"token":"{doc_token}"}}']
     result = subprocess.run(
         cmd,
-        shell=True,
+        shell=False,
         capture_output=True
     )
     if result.returncode != 0:

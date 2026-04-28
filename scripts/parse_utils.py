@@ -37,16 +37,15 @@ def get_file_token_from_doc(doc_token):
 
     返回: (file_token, error_msg)
     """
-    import platform
-    # 使用 wiki spaces get_node 获取文件元数据
-    # Windows 需要双引号包裹 JSON 并转义，Linux/macOS 用单引号即可
-    if platform.system() == 'Windows':
-        cmd = f'lark-cli wiki spaces get_node --params "{{\\"token\\":\\"{doc_token}\\"}}"'
-    else:
-        cmd = f"lark-cli wiki spaces get_node --params '{{\\\"token\\\":\\\"{doc_token}\\\"}}'"
+    # 参数校验
+    if not doc_token or not doc_token.strip():
+        return "", "doc_token 无效"
+    doc_token = doc_token.strip()[:100]
+
+    cmd = ["lark-cli", "wiki", "spaces", "get_node", "--params", f'{{"token":"{doc_token}"}}']
     result = subprocess.run(
         cmd,
-        shell=True,
+        shell=False,
         capture_output=True
     )
     if result.returncode != 0:
@@ -76,11 +75,19 @@ def download_file(file_token, output_filename):
 
     返回: (success, error_msg)
     """
+    # 参数校验
+    if not file_token or not file_token.strip():
+        return False, "file_token 无效"
+    if not output_filename or not output_filename.strip():
+        return False, "output_filename 无效"
+    file_token = file_token.strip()[:100]
+    output_filename = output_filename.strip()[:255]
+
     # lark-cli 要求相对路径，不能是 /tmp/xxx
-    cmd = f'lark-cli drive +download --file-token "{file_token}" --output "{output_filename}"'
+    cmd = ["lark-cli", "drive", "+download", "--file-token", file_token, "--output", output_filename]
     result = subprocess.run(
         cmd,
-        shell=True,
+        shell=False,
         capture_output=True
     )
     if result.returncode != 0:

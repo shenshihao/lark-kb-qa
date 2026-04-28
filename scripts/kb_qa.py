@@ -14,6 +14,40 @@ import re
 MINIMAX_API_URL = "https://api.minimaxi.com/anthropic/v1/messages"
 MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY", "")
 
+# 搜索缓存 (TTL 5分钟)
+_SEARCH_CACHE = {}
+_CACHE_TTL = 300
+
+
+def _get_cache_key(query, system, max_results):
+    return f"{query}|{system}|{max_results}"
+
+
+def _get_cached(key):
+    import time
+    if key in _SEARCH_CACHE:
+        timestamp, data = _SEARCH_CACHE[key]
+        if time.time() - timestamp < _CACHE_TTL:
+            return data
+        del _SEARCH_CACHE[key]
+    return None
+
+
+def _set_cache(key, data):
+    import time
+    _SEARCH_CACHE[key] = (time.time(), data)
+
+
+def _clear_expired_cache():
+    import time
+    keys_to_delete = []
+    for key, (timestamp, _) in _SEARCH_CACHE.items():
+        if time.time() - timestamp >= _CACHE_TTL:
+            keys_to_delete.append(key)
+    for key in keys_to_delete:
+        del _SEARCH_CACHE[key]
+
+
 # 知识库配置
 KNOWLEDGE_SPACE_ID = "7628219860123667634"
 
@@ -28,6 +62,18 @@ SYSTEM_TITLE_KEYWORDS = {
     "低延时": ["低延时", "lowlatency", "low-latency"],
     "顶点": ["顶点", "dingding", "hts"],
 }
+
+def html_escape(text):
+    """安全转义 HTML 特殊字符，防止 XSS"""
+    if not text:
+        return ""
+    return (text
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;"))
+
 
 # 输入安全过滤规则（基于 RAG 提示工程最佳实践）
 ATTACK_PATTERNS = [
@@ -68,12 +114,19 @@ def input_filter(question):
 
 def run_command(cmd):
     """执行 shell 命令并返回输出"""
-    result = subprocess.run(
-        cmd,
-        shell=True,
-        capture_output=True,
-        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    )
+    # 支持 list 或 str，list 时使用 shell=False 防止注入
+    if isinstance(cmd, list):
+        result = subprocess.run(
+            cmd,
+            shell=False,
+            capture_output=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    else:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     stdout = result.stdout.decode('utf-8', errors='replace') if result.stdout else ""
     stderr = result.stderr.decode('utf-8', errors='replace') if result.stderr else ""
     return stdout, stderr, result.returncode
@@ -235,6 +288,35 @@ def expand_query_for_retry(question):
     return list(set(queries))[:3]
 
 
+def get_empty_result_suggestions(question):
+    """为空结果时生成用户建议"""
+    suggestions = []
+
+    # 基于问题词推荐相关搜索词
+    stop_words = {"的", "了", "是", "在", "和", "与", "或", "及", "等", "我", "你", "他", "她", "它", "这", "那"}
+    words = re.findall(r'[\w]+', question)
+    main_terms = [w for w in words if w not in stop_words and len(w) >= 2]
+
+    if main_terms:
+        # 提取主词
+        core = main_terms[0] if main_terms else ""
+        suggestions.append(f"可以尝试搜索「{core}规则」或「{core}说明」")
+
+    # 基于系统关键词推荐
+    question_lower = question.lower()
+    if any(t.lower() in question_lower for t in ["融资", "融券", "开仓", "平仓"]):
+        suggestions.append("可以尝试搜索「融资融券规则」或「两融业务说明」")
+    if any(t.lower() in question_lower for t in ["保证金", "征信", "授信"]):
+        suggestions.append("可以尝试搜索「保证金规则」或「征信的流程」")
+    if any(t.lower() in question_lower for t in ["风控", "预警", "平仓线"]):
+        suggestions.append("可以尝试搜索「风控规则」或「预警线说明」")
+
+    if not suggestions:
+        suggestions.append("可以尝试使用更通用的关键词，如业务名称或系统名称")
+
+    return " ".join(suggestions)
+
+
 def search_with_hybrid(question, system="all", max_results=5):
     """混合检索：关键词搜索 + 向量检索融合
 
@@ -374,7 +456,20 @@ def search_with_bm25(question, system="all", max_results=5):
 
 def search_lark_cli(query, system="all", max_results=10):
     """调用 lark-cli 搜索知识库"""
-    cmd = f'lark-cli docs +search --query "{query}" --page-size {max_results} --format json'
+    # 查询参数校验
+    if not query or len(query.strip()) < 1:
+        return [], "查询词无效"
+    query = query.strip()[:200]  # 限制长度，防止过长输入
+
+    # 检查缓存
+    _clear_expired_cache()
+    cache_key = _get_cache_key(query, system, max_results)
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        print(f"[缓存命中] {query}")
+        return cached, None
+
+    cmd = ["lark-cli", "docs", "+search", "--query", query, "--page-size", str(max_results), "--format", "json"]
     stdout, stderr, code = run_command(cmd)
 
     if code != 0 or not stdout:
@@ -408,13 +503,15 @@ def search_lark_cli(query, system="all", max_results=10):
                         title = re.sub(r'<[^>]+>', '', title_highlighted)
 
                 results.append({
-                    "title": title or "无标题",
-                    "url": meta.get("url", ""),
-                    "token": meta.get("token", ""),
-                    "doc_type": meta.get("doc_types", ""),
-                    "file_type": file_type,
-                    "summary": item.get("summary_highlighted", ""),
+                    "title": html_escape(title) if title else "无标题",
+                    "url": meta.get("url", "") or "",
+                    "token": meta.get("token", "") or "",
+                    "doc_type": meta.get("doc_types", "") or "",
+                    "file_type": file_type or "",
+                    "summary": html_escape(item.get("summary_highlighted", "")) if item.get("summary_highlighted") else "",
                 })
+        # 写入缓存
+        _set_cache(cache_key, results)
         return results, None
     except json.JSONDecodeError as e:
         return [], f"解析搜索结果失败: {e}"
@@ -487,11 +584,7 @@ def fetch_document_content(doc_token, doc_type, file_type=""):
         file_type: 文件类型 (当 doc_type=FILE 时，用于区分 xlsx/docx/pdf)
     """
     if doc_type == "WIKI":
-        import platform
-        if platform.system() == 'Windows':
-            get_node_cmd = f'lark-cli wiki spaces get_node --params "{{\\"token\\":\\"{doc_token}\\"}}"'
-        else:
-            get_node_cmd = f"lark-cli wiki spaces get_node --params '{{\\\"token\\\":\\\"{doc_token}\\\"}}'"
+        get_node_cmd = ["lark-cli", "wiki", "spaces", "get_node", "--params", f'{{"token":"{doc_token}"}}']
         stdout, stderr, code = run_command(get_node_cmd)
         if code == 0:
             try:
@@ -507,7 +600,7 @@ def fetch_document_content(doc_token, doc_type, file_type=""):
                 pass
 
     if doc_type in ["DOCX", "DOC"]:
-        cmd = f'lark-cli docs +fetch --doc {doc_token} --format json'
+        cmd = ["lark-cli", "docs", "+fetch", "--doc", doc_token, "--format", "json"]
         stdout, stderr, code = run_command(cmd)
         if code == 0:
             try:
@@ -544,7 +637,7 @@ def fetch_document_content(doc_token, doc_type, file_type=""):
             return parse_document(doc_token, "CSV", max_chars=1000)
         elif ft_lower == "docx":
             # docx 走 docs +fetch
-            cmd = f'lark-cli docs +fetch --doc {doc_token} --format json'
+            cmd = ["lark-cli", "docs", "+fetch", "--doc", doc_token, "--format", "json"]
             stdout, stderr, code = run_command(cmd)
             if code == 0:
                 try:
@@ -791,6 +884,8 @@ def main():
 
     if not results:
         print("[未找到相关文档]")
+        suggestions = get_empty_result_suggestions(args.question)
+        print(f"[建议] {suggestions}")
         return
 
     print(f"[找到 {len(results)} 篇相关文档]\n")

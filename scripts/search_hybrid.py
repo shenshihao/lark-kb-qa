@@ -15,12 +15,23 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from scripts.embedding_cache import get_embedding, cosine_similarity, load_vector_cache
 
 # lark-cli 搜索
+def html_escape(text):
+    """安全转义 HTML 特殊字符"""
+    if not text:
+        return ""
+    return (text
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;"))
+
+
 def keyword_search(query, max_results=20):
     """调用 lark-cli 进行关键词搜索"""
-    cmd = f'lark-cli docs +search --query "{query}" --page-size {max_results} --format json'
+    cmd = ["lark-cli", "docs", "+search", "--query", query, "--page-size", str(max_results), "--format", "json"]
     result = __import__('subprocess').run(
         cmd,
-        shell=True,
         capture_output=True,
         cwd=Path(__file__).parent.parent
     )
